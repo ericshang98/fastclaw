@@ -12,11 +12,13 @@ import (
 	"strings"
 )
 
-// OpenAIProvider implements the Provider interface for OpenAI-compatible APIs.
+// OpenAIProvider implements the Provider and ToolChoiceProvider interfaces
+// for OpenAI-compatible APIs.
 type OpenAIProvider struct {
-	apiKey  string
-	apiBase string
-	client  *http.Client
+	apiKey     string
+	apiBase    string
+	client     *http.Client
+	toolChoice string // "", "auto", "none", "required"
 }
 
 // NewOpenAI creates a new OpenAI-compatible provider.
@@ -43,12 +45,19 @@ type apiMessage struct {
 }
 
 type chatRequest struct {
-	Model       string       `json:"model"`
-	Messages    []apiMessage `json:"messages"`
-	Tools       []Tool       `json:"tools,omitempty"`
-	MaxTokens   int          `json:"max_tokens,omitempty"`
-	Temperature float64      `json:"temperature,omitempty"`
-	Stream      bool         `json:"stream"`
+	Model              string       `json:"model"`
+	Messages           []apiMessage `json:"messages"`
+	Tools              []Tool       `json:"tools,omitempty"`
+	MaxTokens          int          `json:"max_tokens,omitempty"`
+	Temperature        float64      `json:"temperature,omitempty"`
+	Stream             bool         `json:"stream"`
+	ParallelToolCalls  *bool        `json:"parallel_tool_calls,omitempty"`
+	ToolChoice         string       `json:"tool_choice,omitempty"`
+}
+
+// SetToolChoice implements ToolChoiceProvider.
+func (p *OpenAIProvider) SetToolChoice(choice string) {
+	p.toolChoice = choice
 }
 
 // toAPIMessages converts provider Messages to wire-format apiMessages,
@@ -107,6 +116,16 @@ func (p *OpenAIProvider) buildRequest(ctx context.Context, messages []Message, t
 	}
 	if len(tools) > 0 {
 		req.Tools = tools
+		// Prefer sequential tool calls so the model can reason about each
+		// result before deciding the next action (ReAct pattern). The code
+		// in step.go still handles multiple tool calls gracefully if the
+		// provider ignores this parameter.
+		f := false
+		req.ParallelToolCalls = &f
+		// Apply dynamic tool_choice if set (used by ResetToolChoice)
+		if p.toolChoice != "" {
+			req.ToolChoice = p.toolChoice
+		}
 	}
 
 	body, err := json.Marshal(req)

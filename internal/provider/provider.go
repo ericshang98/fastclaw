@@ -62,10 +62,20 @@ func (r *Response) HasToolCalls() bool {
 	return len(r.ToolCalls) > 0
 }
 
+// ToolEvent is emitted during the ReAct loop so SSE consumers can show
+// real-time tool execution status (calling → completed/error).
+type ToolEvent struct {
+	Tool   string `json:"tool"`
+	Status string `json:"status"` // "calling", "completed", "error"
+	Params string `json:"params,omitempty"`
+	Result string `json:"result,omitempty"`
+}
+
 // StreamChunk represents a single chunk from a streaming response.
 type StreamChunk struct {
 	Content   string
 	ToolCalls []ToolCall
+	ToolEvent *ToolEvent // non-nil = this chunk is a tool event, not text
 	Done      bool
 }
 
@@ -100,4 +110,13 @@ func (r *StreamReader) SetErr(err error) {
 type Provider interface {
 	Chat(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (*Response, error)
 	ChatStream(ctx context.Context, messages []Message, tools []Tool, model string, maxTokens int, temperature float64) (*StreamReader, error)
+}
+
+// ToolChoiceProvider is an optional interface that providers can implement
+// to support dynamic tool_choice control. The agent loop uses this to reset
+// tool_choice after tools are used (OpenAI Agents SDK ResetToolChoice pattern).
+type ToolChoiceProvider interface {
+	// SetToolChoice sets tool_choice for subsequent Chat calls.
+	// Valid values: "auto", "none", "required", or "" (provider default).
+	SetToolChoice(choice string)
 }
