@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -63,29 +62,11 @@ func (hb *Heartbeat) Start(ctx context.Context) {
 }
 
 func (hb *Heartbeat) tick(ctx context.Context) {
-	slog.Info("heartbeat tick", "agent", hb.agent.Name())
+	slog.Debug("heartbeat tick (keepalive)", "agent", hb.agent.Name())
 
-	// 1. Check HEARTBEAT.md for tasks
-	tasks := hb.loadHeartbeatTasks()
-	if tasks != "" {
-		now := time.Now()
-		heartbeatMsg := fmt.Sprintf(
-			"[Heartbeat — %s]\nCurrent tasks from HEARTBEAT.md:\n%s\n\nReview these tasks and take action on any that need attention based on the current date/time.",
-			now.Format("2006-01-02 15:04:05"),
-			tasks,
-		)
-
-		// Feed as an inbound message through the bus
-		hb.bus.Inbound <- bus.InboundMessage{
-			Channel:  "heartbeat",
-			ChatID:   "heartbeat_" + hb.agent.Name(),
-			UserID:   "system",
-			Text:     heartbeatMsg,
-			PeerKind: "dm",
-		}
-	}
-
-	// 2. Trigger memory update
+	// Heartbeat is a pure keepalive signal — it does NOT trigger LLM calls.
+	// Its only job is to maintain the app's background connection and
+	// periodically consolidate long-term memory from conversation logs.
 	hb.updateMemory()
 }
 

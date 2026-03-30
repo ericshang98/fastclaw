@@ -163,6 +163,11 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 			text = fmt.Sprintf("[Cron Job: %s] This is a scheduled task trigger.", j.Name)
 		}
 
+		// Append self-reflection prompt and job metadata
+		text += fmt.Sprintf("\n\n[Cron Job ID: %s | Name: %s | Type: %s | Schedule: %s]",
+			j.ID, j.Name, j.Type, j.Schedule)
+		text += cronReflectionPrompt
+
 		s.bus.Inbound <- bus.InboundMessage{
 			Channel:  j.Channel,
 			ChatID:   j.ChatID,
@@ -194,11 +199,21 @@ func (s *Scheduler) runJob(ctx context.Context, job Job) {
 	}
 }
 
+// MinInterval is the minimum allowed interval for cron jobs (60 seconds).
+// Anything shorter is clamped to prevent runaway jobs from flooding the agent.
+const MinInterval = 60 * time.Second
+
 func (s *Scheduler) runInterval(ctx context.Context, job Job) {
 	dur, err := time.ParseDuration(job.Schedule)
 	if err != nil {
 		slog.Error("invalid interval duration", "name", job.Name, "schedule", job.Schedule, "error", err)
 		return
+	}
+
+	if dur < MinInterval {
+		slog.Warn("cron interval too short, clamping to minimum",
+			"name", job.Name, "requested", dur, "minimum", MinInterval)
+		dur = MinInterval
 	}
 
 	ticker := time.NewTicker(dur)
@@ -303,6 +318,22 @@ func fieldMatch(field string, value int) bool {
 	return n == value
 }
 
+// cronReflectionPrompt is appended to every cron-triggered message so the
+// agent evaluates whether the job is still needed after executing the task.
+const cronReflectionPrompt = `
+
+---
+[System: Cron Self-Check]
+This message was triggered by a scheduled cron job. After completing the task above, you MUST evaluate:
+
+1. Was this task still relevant? (e.g., is the meeting/event still in the future?)
+2. Is this a one-time task that is now done? If yes, delete this cron job using delete_cron_job.
+3. Does this cron job seem like a mistake? (e.g., recurring every hour for a one-time reminder)
+   If yes, delete it and briefly tell the user what you cleaned up.
+4. If the task is still valid and recurring, just complete it normally.
+
+Be proactive: clean up stale or incorrect cron jobs rather than letting them keep firing.`
+
 func (s *Scheduler) fireJob(job Job) {
 	slog.Info("cron job firing", "name", job.Name, "agent", job.AgentID)
 
@@ -310,6 +341,11 @@ func (s *Scheduler) fireJob(job Job) {
 	if text == "" {
 		text = fmt.Sprintf("[Cron Job: %s] This is a scheduled task trigger.", job.Name)
 	}
+
+	// Append self-reflection prompt so the agent can audit this cron job
+	text += fmt.Sprintf("\n\n[Cron Job ID: %s | Name: %s | Type: %s | Schedule: %s]",
+		"config", job.Name, string(job.Type), job.Schedule)
+	text += cronReflectionPrompt
 
 	s.bus.Inbound <- bus.InboundMessage{
 		Channel:  job.Channel,
