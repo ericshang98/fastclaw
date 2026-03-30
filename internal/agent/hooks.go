@@ -18,19 +18,22 @@ const (
 	AfterModelCall
 	BeforeToolCall
 	AfterToolCall
+	OnAgentStart // fired once at the beginning of the agent run
+	OnAgentEnd   // fired once when the agent produces a final output
 )
 
 // HookContext carries data available to hooks at each hook point.
 type HookContext struct {
-	AgentName  string
-	Point      HookPoint
-	Messages   []provider.Message
-	ToolName   string // for tool-related hooks
-	ToolArgs   string // for BeforeToolCall
-	ToolResult string // for AfterToolCall
-	Response   *provider.Response
-	Error      error
-	StartTime  time.Time // set at BeforeModelCall/BeforeToolCall for timing
+	AgentName   string
+	Point       HookPoint
+	Messages    []provider.Message
+	ToolName    string // for tool-related hooks
+	ToolArgs    string // for BeforeToolCall
+	ToolResult  string // for AfterToolCall
+	Response    *provider.Response
+	FinalOutput string // for OnAgentEnd
+	Error       error
+	StartTime   time.Time // set at BeforeModelCall/BeforeToolCall for timing
 }
 
 // HookFunc is a function that runs at a hook point.
@@ -94,6 +97,10 @@ func LoggingHook() HookFunc {
 			slog.Debug("hook: before system prompt", "agent", hc.AgentName)
 		case AfterSystemPrompt:
 			slog.Debug("hook: after system prompt", "agent", hc.AgentName)
+		case OnAgentStart:
+			slog.Info("hook: agent start", "agent", hc.AgentName)
+		case OnAgentEnd:
+			slog.Info("hook: agent end", "agent", hc.AgentName)
 		}
 	}
 }

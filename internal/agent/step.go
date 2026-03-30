@@ -47,6 +47,17 @@ type RunConfig struct {
 	// preventing infinite tool-calling loops. Default: true.
 	// Mirrors OpenAI Agents SDK's ResetToolChoice behavior.
 	ResetToolChoice *bool
+
+	// ToolUseBehavior controls what happens after tools are executed.
+	// Default: RunLLMAgainBehavior() — feed results back to the LLM.
+	// Alternatives: StopOnFirstToolBehavior(), StopAtToolsBehavior("tool1", "tool2").
+	ToolUseBehavior ToolUseBehavior
+
+	// OnMaxTurns is called when the agent loop reaches maxToolIterations.
+	// If it returns a non-empty string, that string is used as the final
+	// response instead of the default error message.
+	// The callback receives the accumulated messages for context.
+	OnMaxTurns func(ctx context.Context, messages []provider.Message) string
 }
 
 // shouldResetToolChoice returns whether tool_choice should be reset after use.
@@ -188,6 +199,19 @@ func (a *Agent) processToolCalls(
 		if mediaPaths := extractMediaPaths(r.Content); len(mediaPaths) > 0 {
 			a.sendMediaFiles(msg, mediaPaths)
 		}
+	}
+
+	// ── Check ToolUseBehavior: should tool results be the final output? ──
+	behavior := RunLLMAgainBehavior()
+	if a.runConfig != nil && a.runConfig.ToolUseBehavior != nil {
+		behavior = a.runConfig.ToolUseBehavior
+	}
+	br, err := behavior.ToolsToFinalOutput(ctx, results)
+	if err != nil {
+		slog.Warn("tool use behavior error", "agent", a.name, "error", err)
+	} else if br.IsFinalOutput {
+		sess.Append(provider.Message{Role: "assistant", Content: br.FinalOutput})
+		return messages, NextStepFinalOutput{Content: br.FinalOutput}
 	}
 
 	return messages, NextStepRunAgain{}

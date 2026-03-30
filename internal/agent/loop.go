@@ -88,6 +88,8 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	hooks.Register(AfterModelCall, LoggingHook())
 	hooks.Register(BeforeToolCall, LoggingHook())
 	hooks.Register(AfterToolCall, LoggingHook())
+	hooks.Register(OnAgentStart, LoggingHook())
+	hooks.Register(OnAgentEnd, LoggingHook())
 
 	ag := &Agent{
 		name:              rc.ID,
@@ -205,27 +207,49 @@ func (a *Agent) Model() string {
 	return a.model
 }
 
-// HandleMessage processes an inbound message through the agent loop.
-// The loop uses a state-machine pattern inspired by the OpenAI Agents SDK:
-// each iteration returns a NextStep that determines whether to return a final
-// response, execute more tools, or stop due to a detected loop.
+// HandleMessage processes an inbound message and returns the final text.
+// It is a convenience wrapper around HandleMessageFull.
 func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) string {
 	if result := a.handleSlashCommand(msg); result.handled {
 		return result.reply
 	}
+	r := a.HandleMessageFull(ctx, msg)
+	return r.FinalOutput
+}
+
+// HandleMessageFull processes an inbound message through the agent loop and
+// returns a full RunResult with all intermediate data.
+//
+// The loop uses a state-machine pattern inspired by the OpenAI Agents SDK:
+// each iteration returns a NextStep that determines whether to return a final
+// response, execute more tools, or stop due to a detected loop.
+func (a *Agent) HandleMessageFull(ctx context.Context, msg bus.InboundMessage) *RunResult {
+	rr := &RunResult{Input: msg.Text}
 
 	sess, messages, toolDefs := a.prepareContext(msg)
+
+	// ── Hook: OnAgentStart ──
+	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: OnAgentStart})
 
 	// ── Input guardrails (parallel) ──
 	if a.runConfig != nil && len(a.runConfig.InputGuardrails) > 0 {
 		result, err := runInputGuardrails(ctx, a, msg.Text, a.runConfig.InputGuardrails)
+		if result != nil {
+			rr.InputGuardrailResults = append(rr.InputGuardrailResults, *result)
+		}
 		if err != nil {
 			slog.Error("input guardrail error", "agent", a.name, "error", err)
-			return "Sorry, I can't process that request."
+			rr.FinalOutput = "Sorry, I can't process that request."
+			rr.Error = &InputGuardrailTrippedError{GuardrailName: result.Name, Output: result.Output}
+			rr.Messages = messages
+			return rr
 		}
 		if result != nil && result.Output.TripwireTriggered {
 			slog.Warn("input guardrail tripped", "agent", a.name, "guardrail", result.Name)
-			return "Sorry, I can't process that request."
+			rr.FinalOutput = "Sorry, I can't process that request."
+			rr.Error = &InputGuardrailTrippedError{GuardrailName: result.Name, Output: result.Output}
+			rr.Messages = messages
+			return rr
 		}
 	}
 
@@ -233,12 +257,14 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	tracker := &toolUseTracker{}
 
 	for turn := 1; turn <= a.maxToolIterations; turn++ {
+		rr.TurnsUsed = turn
+
 		slog.Info("agent loop iteration",
 			"agent", a.name, "turn", turn,
 			"channel", msg.Channel, "chat_id", msg.ChatID,
 		)
 
-		// ── ResetToolChoice: after tools were used, reset to "auto" ──
+		// ── ResetToolChoice ──
 		a.maybeResetToolChoice(tracker)
 
 		// ── Call LLM ──
@@ -252,7 +278,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 
 		if err != nil {
 			slog.Error("LLM chat failed", "agent", a.name, "error", err)
-			return "Sorry, I encountered an error processing your request."
+			rr.FinalOutput = "Sorry, I encountered an error processing your request."
+			rr.Error = err
+			rr.Messages = messages
+			return rr
 		}
 
 		// ── Decide next step ──
@@ -263,16 +292,30 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 			// ── Output guardrails (parallel) ──
 			if a.runConfig != nil && len(a.runConfig.OutputGuardrails) > 0 {
 				result, err := runOutputGuardrails(ctx, a, s.Content, a.runConfig.OutputGuardrails)
+				if result != nil {
+					rr.OutputGuardrailResults = append(rr.OutputGuardrailResults, *result)
+				}
 				if err != nil {
 					slog.Error("output guardrail error", "agent", a.name, "error", err)
-					return "Sorry, I encountered an error validating the response."
+					rr.FinalOutput = "Sorry, I encountered an error validating the response."
+					rr.Error = err
+					rr.Messages = step.Messages
+					return rr
 				}
 				if result != nil && result.Output.TripwireTriggered {
 					slog.Warn("output guardrail tripped", "agent", a.name, "guardrail", result.Name)
-					return "Sorry, I can't provide that response."
+					rr.FinalOutput = "Sorry, I can't provide that response."
+					rr.Error = &OutputGuardrailTrippedError{GuardrailName: result.Name, Output: result.Output}
+					rr.Messages = step.Messages
+					return rr
 				}
 			}
-			return s.Content
+
+			rr.FinalOutput = s.Content
+			rr.Messages = step.Messages
+			// ── Hook: OnAgentEnd ──
+			a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: OnAgentEnd, FinalOutput: s.Content})
+			return rr
 
 		case NextStepRunAgain:
 			tracker.markUsed()
@@ -285,8 +328,26 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		break
 	}
 
+	// ── Max turns exceeded ──
 	slog.Warn("max tool iterations reached", "agent", a.name, "max", a.maxToolIterations)
-	return "I've reached the maximum number of tool iterations. Here's what I have so far."
+
+	// Allow custom handling via OnMaxTurns callback
+	fallback := "I've reached the maximum number of tool iterations. Here's what I have so far."
+	if a.runConfig != nil && a.runConfig.OnMaxTurns != nil {
+		if custom := a.runConfig.OnMaxTurns(ctx, messages); custom != "" {
+			fallback = custom
+		}
+	}
+
+	rr.FinalOutput = fallback
+	rr.Error = NewMaxTurnsExceededError(a.maxToolIterations, &RunErrorDetails{
+		Input:          msg.Text,
+		Messages:       messages,
+		TurnsCompleted: rr.TurnsUsed,
+	})
+	rr.Messages = messages
+	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: OnAgentEnd, FinalOutput: fallback})
+	return rr
 }
 
 // maybeResetToolChoice resets tool_choice to "auto" after tools have been used,
