@@ -47,7 +47,16 @@ func (g *Gateway) processInbound(ctx context.Context) {
 
 // routeDM handles direct message routing (existing behavior).
 func (g *Gateway) routeDM(ctx context.Context, msg bus.InboundMessage) {
-	ag := g.matchAgent(msg)
+	var ag *agent.Agent
+	if msg.TargetAgentID != "" {
+		ag = g.agents.AgentByID(msg.TargetAgentID)
+		if ag != nil {
+			slog.Info("routing DM by TargetAgentID", "agent", ag.Name())
+		}
+	}
+	if ag == nil {
+		ag = g.matchAgent(msg)
+	}
 	if ag == nil {
 		slog.Warn("no agent matched for DM, dropping",
 			"channel", msg.Channel,

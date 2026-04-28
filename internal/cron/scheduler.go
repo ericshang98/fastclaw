@@ -164,11 +164,12 @@ func (s *Scheduler) processDueJobs(ctx context.Context) {
 		}
 
 		s.bus.Inbound <- bus.InboundMessage{
-			Channel:  j.Channel,
-			ChatID:   j.ChatID,
-			UserID:   "cron",
-			Text:     text,
-			PeerKind: "dm",
+			Channel:       j.Channel,
+			ChatID:        j.ChatID,
+			UserID:        "cron",
+			Text:          text,
+			PeerKind:      "dm",
+			TargetAgentID: j.AgentID,
 		}
 
 		// Calculate next run (simple: add 60s for now; real implementation would parse schedule)
@@ -312,11 +313,12 @@ func (s *Scheduler) fireJob(job Job) {
 	}
 
 	s.bus.Inbound <- bus.InboundMessage{
-		Channel:  job.Channel,
-		ChatID:   job.ChatID,
-		UserID:   "cron",
-		Text:     text,
-		PeerKind: "dm",
+		Channel:       job.Channel,
+		ChatID:        job.ChatID,
+		UserID:        "cron",
+		Text:          text,
+		PeerKind:      "dm",
+		TargetAgentID: job.AgentID,
 	}
 }
 

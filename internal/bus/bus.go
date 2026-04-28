@@ -12,8 +12,9 @@ type InboundMessage struct {
 	SenderName   string   // display name of the sender
 	Mentions     []string // @usernames mentioned in the message
 	IsBotMessage bool     // true if the message was sent by a bot
-	PhotoURL     string   // URL of attached photo (if any)
-	ReplyToMsgID string   // message ID being replied to
+	PhotoURL      string   // URL of attached photo (if any)
+	ReplyToMsgID  string   // message ID being replied to
+	TargetAgentID string   // if set, bypass bindings and route directly to this agent
 }
 
 // OutboundButton represents a button in an inline keyboard.
