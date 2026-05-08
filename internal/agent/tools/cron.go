@@ -42,7 +42,7 @@ func RegisterCronTools(r *Registry, st store.Store, userID, agentID string) {
 				},
 				"schedule": map[string]interface{}{
 					"type":        "string",
-					"description": "When to fire. For type='cron': a 5-field cron expression like '0 9 * * *'. For type='interval': a duration like '5m' / '30m' / '2h'. For type='once': an ISO-8601 datetime in UTC like '2026-05-02T15:56:52'.",
+					"description": "When to fire. For type='once': a relative duration like '+1m' / '+5m' / '+2h' (PREFERRED) or an ISO-8601 datetime like '2026-05-02T15:56:52Z'. For type='interval': '5m' / '30m' / '2h'. For type='cron': a 5-field cron expression like '0 9 * * *'.",
 				},
 				"message": map[string]interface{}{
 					"type":        "string",
@@ -111,17 +111,26 @@ func makeCreateCronJob(st store.Store, r *Registry, userID, agentID string) Tool
 		var nextRun time.Time
 		switch jobType {
 		case "once":
-			t, err := time.Parse(time.RFC3339, args.Schedule)
-			if err != nil {
-				t, err = time.Parse("2006-01-02T15:04:05", args.Schedule)
+			// Support relative durations: "+1m", "+5m30s", "+2h"
+			if strings.HasPrefix(args.Schedule, "+") {
+				dur, err := time.ParseDuration(args.Schedule[1:])
 				if err != nil {
-					return "", fmt.Errorf("once schedule must be ISO datetime (e.g. 2026-05-06T15:30:00Z), got: %q", args.Schedule)
+					return "", fmt.Errorf("invalid relative duration (e.g. '+1m', '+5m30s'): %q", args.Schedule)
 				}
+				nextRun = now.Add(dur)
+			} else {
+				t, err := time.Parse(time.RFC3339, args.Schedule)
+				if err != nil {
+					t, err = time.Parse("2006-01-02T15:04:05", args.Schedule)
+					if err != nil {
+						return "", fmt.Errorf("once schedule: use relative '+1m' or ISO datetime '2026-05-06T15:30:00Z', got: %q", args.Schedule)
+					}
+				}
+				if t.Before(now) {
+					return "", fmt.Errorf("schedule is in the past: %s", args.Schedule)
+				}
+				nextRun = t
 			}
-			if t.Before(now) {
-				return "", fmt.Errorf("schedule is in the past: %s", args.Schedule)
-			}
-			nextRun = t
 		case "interval":
 			sched := strings.TrimPrefix(args.Schedule, "every ")
 			dur, err := time.ParseDuration(sched)
